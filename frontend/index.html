@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>世界杯 AI 预测 · World Cup AI Predictor</title>
+  <meta name="description" content="基于 49,000+ 场历史比赛数据训练的 XGBoost+Poisson 世界杯预测系统，实时抓取比赛信息，动态预测胜平负、比分、胜率。">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/static/style.css?v=20260618U">
+</head>
+<body>
+  <!-- 动态背景 -->
+  <div class="bg-decoration">
+    <div class="bg-blob blob-1"></div>
+    <div class="bg-blob blob-2"></div>
+    <div class="bg-blob blob-3"></div>
+    <div class="bg-grid"></div>
+  </div>
+
+  <!-- 顶部导航 -->
+  <header class="top-nav">
+    <div class="nav-container">
+      <div class="logo">
+        <span class="logo-icon">⚽</span>
+        <div>
+          <h1>世界杯 AI 预测</h1>
+          <p class="logo-sub">World Cup AI Predictor · 2026</p>
+        </div>
+      </div>
+      <nav class="nav-links">
+        <a href="#live" class="nav-link" data-section="live">实时</a>
+        <a href="#predict" class="nav-link" data-section="predict">预测</a>
+        <a href="#schedule" class="nav-link" data-section="schedule">赛程</a>
+        <a href="#results" class="nav-link" data-section="results">战绩</a>
+        <a href="#about" class="nav-link" data-section="about">关于</a>
+      </nav>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <button class="refresh-btn" id="refreshBtn" title="刷新实时数据">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-3-6.7L21 8"/>
+            <path d="M21 3v5h-5"/>
+          </svg>
+          <span>刷新</span>
+        </button>
+        <button class="config-btn" id="configBtn" title="LLM 配置">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-settings-icon lucide-settings"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- LLM 配置弹窗 -->
+  <div class="modal-overlay" id="configModal">
+    <div class="modal-panel glass">
+      <div class="modal-header">
+        <h2><span>⚙️</span> LLM 配置</h2>
+        <button class="modal-close" id="configModalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>厂商 / Provider</label>
+          <select id="configProvider" class="option-select">
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="qwen">通义千问 (Qwen)</option>
+            <option value="zhipu">智谱 (GLM)</option>
+            <option value="moonshot">Moonshot (Kimi)</option>
+            <option value="custom">自定义 / Custom</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>基础 URL / Base URL</label>
+          <input type="text" id="configBaseUrl" class="team-input" placeholder="https://api.openai.com/v1">
+        </div>
+        <div class="form-group">
+          <label>模型名称 / Model</label>
+          <input type="text" id="configModel" class="team-input" placeholder="gpt-4o-mini">
+        </div>
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="configApiKey" class="team-input" placeholder="sk-...">
+          <span class="form-hint" id="configKeyHint"></span>
+        </div>
+        <div class="form-actions">
+          <button class="btn-secondary" id="configTestBtn">测试连接</button>
+          <button class="predict-btn" id="configSaveBtn">
+            <span>保存配置</span>
+          </button>
+        </div>
+        <div id="configStatus" class="config-status"></div>
+      </div>
+    </div>
+  </div>
+
+  <main>
+    <!-- Hero 区域 -->
+    <section class="hero">
+      <div class="hero-content">
+        <div class="hero-badge">
+          <span class="pulse-dot"></span>
+          <span id="heroStatus">2026 FIFA World Cup · 实时预测中</span>
+        </div>
+        <h2 class="hero-title">
+          AI 驱动的<span class="title-accent">世界杯预测</span>
+        </h2>
+        <p class="hero-desc">
+          基于 <strong>49,000+</strong> 场国际比赛历史数据训练，
+          采用 <strong>XGBoost + Poisson</strong> 双模型架构，
+          实时抓取 ESPN 数据源，动态预测胜平负、比分、胜率。
+        </p>
+        <div class="hero-stats" id="heroStats">
+          <div class="stat-card glass">
+            <div class="stat-value" id="statMatches">49,425</div>
+            <div class="stat-label">历史比赛</div>
+          </div>
+          <div class="stat-card glass">
+            <div class="stat-value" id="statTeams">336</div>
+            <div class="stat-label">球队</div>
+          </div>
+          <div class="stat-card glass">
+            <div class="stat-value" id="statAccuracy">57.0%</div>
+            <div class="stat-label">预测准确率</div>
+          </div>
+          <div class="stat-card glass">
+            <div class="stat-value" id="statLive">-</div>
+            <div class="stat-label">今日实时比赛</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 实时比赛 -->
+    <section id="live" class="section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="section-icon">🔴</span> 实时比赛
+        </h2>
+        <span class="section-sub">ESPN 数据源 · 自动刷新</span>
+      </div>
+      <div class="live-grid" id="liveGrid">
+        <div class="loading-card glass">
+          <div class="loader"></div>
+          <p>正在抓取实时比赛数据...</p>
+        </div>
+      </div>
+      <div class="live-disclaimer">
+        ⚠️ 实时预测基于历史统计模型，未考虑伤病、红牌、伤停补时等临场因素，仅供参考。
+      </div>
+    </section>
+
+    <!-- 自定义预测 -->
+    <section id="predict" class="section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="section-icon">🎯</span> 自定义预测
+        </h2>
+        <span class="section-sub">选择两支球队，获取AI预测</span>
+      </div>
+      <div class="predict-panel glass">
+        <div class="predict-setup">
+          <div class="team-selector">
+            <label class="selector-label">主队 / Team A</label>
+            <div class="team-input-wrapper">
+              <input type="text" id="homeInput" class="team-input" placeholder="搜索球队（中/英文）..." autocomplete="off">
+              <div class="team-suggestions" id="homeSuggestions"></div>
+            </div>
+            <div class="team-display" id="homeDisplay">
+              <span class="team-placeholder">选择主队</span>
+            </div>
+          </div>
+          <div class="vs-divider">
+            <div class="vs-text">VS</div>
+          </div>
+          <div class="team-selector">
+            <label class="selector-label">客队 / Team B</label>
+            <div class="team-input-wrapper">
+              <input type="text" id="awayInput" class="team-input" placeholder="搜索球队（中/英文）..." autocomplete="off">
+              <div class="team-suggestions" id="awaySuggestions"></div>
+            </div>
+            <div class="team-display" id="awayDisplay">
+              <span class="team-placeholder">选择客队</span>
+            </div>
+          </div>
+        </div>
+        <div class="predict-options">
+          <div class="option-group">
+            <label class="option-label">赛事</label>
+            <select id="tournamentSelect" class="option-select">
+              <option value="FIFA World Cup">世界杯 FIFA World Cup</option>
+              <option value="FIFA World Cup qualification">世界杯预选赛</option>
+              <option value="UEFA Euro">欧洲杯</option>
+              <option value="Copa América">美洲杯</option>
+              <option value="AFC Asian Cup">亚洲杯</option>
+              <option value="African Cup of Nations">非洲杯</option>
+              <option value="Friendly">友谊赛</option>
+            </select>
+          </div>
+          <div class="option-group">
+            <label class="option-label">场地</label>
+            <select id="neutralSelect" class="option-select">
+              <option value="true">中立场 (世界杯模式)</option>
+              <option value="false">主客场</option>
+            </select>
+          </div>
+          <button class="predict-btn" id="predictBtn">
+            <span>开始预测</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14M13 6l6 6-6 6"/>
+            </svg>
+          </button>
+        </div>
+        <div class="predict-result" id="predictResult">
+          <div class="predict-placeholder">
+            <span class="placeholder-icon">⚽</span>
+            <p>选择两支球队后点击"开始预测"</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 世界杯赛程 -->
+    <section id="schedule" class="section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="section-icon">📅</span> 2026 世界杯赛程
+        </h2>
+        <div class="section-header-right">
+          <span class="section-sub">小组赛至决赛 · 完整赛程</span>
+          <button class="btn-refresh-scores" id="btnRefreshScores" title="从 ESPN 抓取最新比分">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+            更新比分
+          </button>
+        </div>
+      </div>
+
+      <!-- 轮次筛选 -->
+      <div class="schedule-filters" id="scheduleFilters">
+        <button class="filter-tab active" data-phase="all">全部</button>
+        <button class="filter-tab" data-phase="group">小组赛</button>
+        <button class="filter-tab" data-phase="r32">32强</button>
+        <button class="filter-tab" data-phase="r16">16强</button>
+        <button class="filter-tab" data-phase="qf">8强</button>
+        <button class="filter-tab" data-phase="sf">4强</button>
+        <button class="filter-tab" data-phase="3rd">三四名</button>
+        <button class="filter-tab" data-phase="final">决赛</button>
+      </div>
+
+      <!-- 日期筛选 -->
+      <div class="schedule-date-filter" id="scheduleDateFilter">
+        <button class="date-tab active" data-date="all">全部日期</button>
+        <button class="date-tab" data-date="upcoming">未开始</button>
+        <button class="date-tab" data-date="played">已完赛</button>
+      </div>
+
+      <div class="schedule-grid" id="scheduleGrid">
+        <div class="loading-card glass">
+          <div class="loader"></div>
+          <p>加载赛程中...</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 最近战绩 -->
+    <section id="results" class="section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="section-icon">📊</span> 最近比赛结果
+        </h2>
+        <span class="section-sub">最新完成的国际比赛</span>
+      </div>
+      <div class="results-list" id="resultsList">
+        <div class="loading-card glass">
+          <div class="loader"></div>
+          <p>加载最近结果...</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 关于/模型信息 -->
+    <section id="about" class="section">
+      <div class="section-header">
+        <h2 class="section-title">
+          <span class="section-icon">🧠</span> 模型详情
+        </h2>
+        <span class="section-sub">技术架构与训练数据</span>
+      </div>
+      <div class="about-grid">
+        <div class="about-card glass">
+          <div class="about-icon">📈</div>
+          <h3>双模型架构</h3>
+          <p><strong>XGBoost 分类器</strong> 预测胜平负（3分类），<strong>XGBoost Poisson 回归</strong> 预测进球数，<strong>泊松概率矩阵</strong>计算比分概率。</p>
+        </div>
+        <div class="about-card glass">
+          <div class="about-icon">⚙️</div>
+          <h3>特征工程</h3>
+          <p><strong>39 维特征</strong>：Elo等级分（带赛事权重）、近5/10场状态、对战记录、攻防能力、赛事重要性、比赛间隔等。</p>
+        </div>
+        <div class="about-card glass">
+          <div class="about-icon">🌐</div>
+          <h3>数据策略</h3>
+          <p><strong>混合时间策略</strong>：Elo用1872-2025全历史数据积累稳定性，ML模型用2002-2025现代足球数据训练，反映当代战术风格。</p>
+        </div>
+        <div class="about-card glass">
+          <div class="about-icon">🔄</div>
+          <h3>实时更新</h3>
+          <p><strong>ESPN API</strong> 抓取实时比赛，<strong>自动归一化队名</strong>，<strong>定时刷新</strong>预测，支持后台触发模型重训。</p>
+        </div>
+      </div>
+      <div class="metrics-panel glass" id="metricsPanel">
+        <h3>训练指标</h3>
+        <div class="metrics-grid" id="metricsGrid">
+          <div class="metric">
+            <div class="metric-value">-</div>
+            <div class="metric-label">胜平负准确率</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">-</div>
+            <div class="metric-label">Log Loss</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">-</div>
+            <div class="metric-label">主队进球MAE</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">-</div>
+            <div class="metric-label">客队进球MAE</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">-</div>
+            <div class="metric-label">训练样本</div>
+          </div>
+          <div class="metric">
+            <div class="metric-value">-</div>
+            <div class="metric-label">测试样本</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 免责声明 -->
+    <section class="section disclaimer-section">
+      <div class="disclaimer-card glass">
+        <div class="disclaimer-header">
+          <span class="disclaimer-icon">⚠️</span>
+          <h3>重要提示 / Disclaimer</h3>
+        </div>
+        <div class="disclaimer-body">
+          <p class="disclaimer-main">
+            <strong>预测结果仅供参考，足球比赛存在高度不确定性，请理性看待预测结果。</strong>
+          </p>
+          <p class="disclaimer-sub">
+            本系统基于历史统计模型（XGBoost + Poisson）进行概率预测，<strong>未考虑以下不可量化的实时因素</strong>：
+          </p>
+          <ul class="disclaimer-list">
+            <li>🤕 <strong>球员伤病</strong>：核心球员伤停可能显著影响比赛走势</li>
+            <li>🟥 <strong>红黄牌</strong>：比赛中红牌导致的少打多情况无法预判</li>
+            <li>⏱️ <strong>伤停补时</strong>：补时阶段的进球具有随机性</li>
+            <li>🌧️ <strong>天气与场地</strong>：雨雪、高温、海拔等环境因素</li>
+            <li>👔 <strong>临场战术</strong>：教练排兵布阵、轮换、临场调整</li>
+            <li>🧠 <strong>心理因素</strong>：球员压力、士气、更衣室状态</li>
+            <li> VAR <strong>视频裁判</strong>：关键判罚可能改变比赛结果</li>
+          </ul>
+          <p class="disclaimer-footer">
+            历史数据不能完全代表未来，任何预测都无法保证 100% 准确。
+            请将本工具作为<strong>辅助参考</strong>，而非投注或决策的唯一依据。
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>
+      <span>⚽ World Cup AI Predictor</span> ·
+      <span>基于 XGBoost + Poisson</span> ·
+      <span>数据: Kaggle + ESPN</span> ·
+      <span id="footerTime"></span>
+    </p>
+  </footer>
+
+  <!-- AI问赛 悬浮助手 -->
+  <div class="chat-assistant" id="chatAssistant">
+    <!-- 悬浮球 -->
+    <button class="chat-bubble" id="chatBubble" title="AI问赛">
+      <svg class="chat-bubble-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span class="chat-bubble-dot"></span>
+    </button>
+
+    <!-- 对话面板 -->
+    <div class="chat-panel glass" id="chatPanel">
+      <div class="chat-panel-header">
+        <div class="chat-panel-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span>AI 问赛</span>
+        </div>
+        <div class="chat-panel-actions">
+          <label class="chat-toggle" title="思考模式">
+            <input type="checkbox" id="chatThinkingToggle">
+            <span class="chat-toggle-label">🧠</span>
+          </label>
+          <label class="chat-toggle" title="联网搜索">
+            <input type="checkbox" id="chatSearchToggle">
+            <span class="chat-toggle-label">🌐</span>
+          </label>
+          <button class="chat-clear-btn" id="chatClearBtn" title="清除历史对话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+              <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>
+            </svg>
+          </button>
+          <button class="chat-panel-close" id="chatPanelClose">&times;</button>
+        </div>
+      </div>
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-welcome">
+          <div class="chat-welcome-icon">⚽</div>
+          <p>你好！我是 <strong>AI问赛</strong>，你的世界杯足球AI助手。</p>
+          <p>可以问我关于任何比赛的分析、预测、球队数据等问题。</p>
+          <div class="chat-quick-questions">
+            <button class="quick-q" data-q="法国队和巴西队谁更强？分析两队实力对比。">🇫🇷 法国 vs 🇧🇷 巴西 实力分析</button>
+            <button class="quick-q" data-q="请分析本届世界杯的夺冠热门球队，并给出理由。">🏆 本届世界杯夺冠热门</button>
+            <button class="quick-q" data-q="阿根廷队近期的状态如何？分析他们的优势和劣势。">🇦🇷 阿根廷队近期状态</button>
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-area">
+        <input type="text" class="chat-input" id="chatInput" placeholder="输入你的问题...">
+        <button class="chat-send-btn" id="chatSendBtn" title="发送">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+        <button class="chat-stop-btn" id="chatStopBtn" title="停止生成" style="display:none;" onclick="stopChatMessage()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <rect x="4" y="4" width="16" height="16" rx="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/static/script.js?v=20260618u"></script>
+</body>
+</html>
