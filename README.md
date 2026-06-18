@@ -13,6 +13,15 @@
 
 ---
 
+<div align="center" style="margin:20px 0;">
+  <img 
+    src="./docs/static/readme.gif" 
+    alt="项目实时演示" 
+  >
+</div>
+
+---
+
 ⚠️ **重要提示 / Disclaime**
 
 **预测结果仅供参考，足球比赛存在高度不确定性，请理性看待预测结果**
