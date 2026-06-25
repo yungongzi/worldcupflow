@@ -594,10 +594,19 @@ if frontend_dir.exists():
 
 
 if __name__ == "__main__":
+    import asyncio
     import uvicorn
     print("\n" + "=" * 70)
     print("  世界杯预测系统启动")
     print("  访问地址: http://localhost:8018")
     print("  API文档:   http://localhost:8018/docs")
     print("=" * 70 + "\n")
-    uvicorn.run(app, host="0.0.0.0", port=8018, log_level="info")
+    # uvicorn.run(app, host="0.0.0.0", port=8018, log_level="info")
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=8018,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve())

@@ -219,7 +219,7 @@ def merge_with_local_results(live_data: List[Dict]) -> dict:
     import pandas as pd
     local_path = DATA_DIR / 'results.csv'
     df = pd.read_csv(local_path)
-    df['date'] = pd.to_datetime(df['date'])
+    df['date'] = pd.to_datetime(df['date'], utc=True)
 
     updated_count = 0
     added_count = 0
@@ -230,7 +230,7 @@ def merge_with_local_results(live_data: List[Dict]) -> dict:
             continue
 
         try:
-            item_date = pd.to_datetime(item['date']).date()
+            item_date = pd.to_datetime(item['date'], utc=True).date()
         except Exception:
             continue
 
