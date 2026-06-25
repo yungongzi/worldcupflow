@@ -227,28 +227,136 @@ async def manual_update_score(
     match_date: str = Query(...),
     home_score: int = Query(...),
     away_score: int = Query(...),
+    match_id: int = Query(None),  # 可选：赛程 JSON 中的 match_id
 ):
-    """手动更新单场比赛比分"""
+    """手动更新/插入单场比赛比分到 results.csv"""
     import pandas as pd
+    from model.predictor import WorldCupPredictor
+
     DATA_DIR = Path(__file__).parent / 'data'
     csv_path = DATA_DIR / 'results.csv'
+    schedule_path = DATA_DIR / 'wc2026_schedule.json'
+
+    h_normalized = WorldCupPredictor._normalize_team(home_team)
+    a_normalized = WorldCupPredictor._normalize_team(away_team)
+
     try:
         df = pd.read_csv(csv_path)
         df['date'] = pd.to_datetime(df['date'])
+        target_date = pd.to_datetime(match_date).date()
+
+        # 1. 精确匹配
         mask = (
             (df['home_team'] == home_team) &
             (df['away_team'] == away_team) &
-            (df['date'].dt.date == pd.to_datetime(match_date).date())
+            (df['date'].dt.date == target_date) &
+            (df['tournament'] == 'FIFA World Cup')
         )
+        # 2. 归一化匹配
         if not mask.any():
-            raise HTTPException(404, f"未找到比赛: {home_team} vs {away_team} ({match_date})")
-        idx = df[mask].index[0]
-        df.at[idx, 'home_score'] = home_score
-        df.at[idx, 'away_score'] = away_score
-        df.to_csv(csv_path, index=False)
+            mask = (
+                (df['home_team'].apply(WorldCupPredictor._normalize_team) == h_normalized) &
+                (df['away_team'].apply(WorldCupPredictor._normalize_team) == a_normalized) &
+                (df['date'].dt.date == target_date) &
+                (df['tournament'] == 'FIFA World Cup')
+            )
+
+        # 3. 跨日期 ±1 天（时区差）
+        is_cross_day = False
+        if not mask.any():
+            for delta_days in [1, -1]:
+                alt_date = target_date + pd.Timedelta(days=delta_days)
+                mask = (
+                    (df['home_team'].apply(WorldCupPredictor._normalize_team) == h_normalized) &
+                    (df['away_team'].apply(WorldCupPredictor._normalize_team) == a_normalized) &
+                    (df['date'].dt.date == alt_date) &
+                    (df['tournament'] == 'FIFA World Cup')
+                )
+                if mask.any():
+                    is_cross_day = True
+                    break
+
+        if mask.any():
+            # 更新已有条目（正向匹配）
+            idx = df[mask].index[0]
+            df.at[idx, 'home_score'] = home_score
+            df.at[idx, 'away_score'] = away_score
+            df['date'] = df['date'].dt.strftime('%Y-%m-%d')
+            df.to_csv(csv_path, index=False)
+            action = "updated"
+        else:
+            # 4. 主客队互换匹配（ESPN 抓取时主客队顺序可能反了）
+            swap_updated = False
+            for delta_days in [0, 1, -1]:
+                alt_date = target_date + pd.Timedelta(days=delta_days)
+                swap_mask = (
+                    (df['home_team'].apply(WorldCupPredictor._normalize_team) == a_normalized) &
+                    (df['away_team'].apply(WorldCupPredictor._normalize_team) == h_normalized) &
+                    (df['date'].dt.date == alt_date) &
+                    (df['tournament'] == 'FIFA World Cup')
+                )
+                if swap_mask.any():
+                    idx = swap_mask.index[0]
+                    # 数据中主客队互换，比分也需互换写入
+                    df.at[idx, 'home_score'] = away_score
+                    df.at[idx, 'away_score'] = home_score
+                    df['date'] = df['date'].dt.strftime('%Y-%m-%d')
+                    df.to_csv(csv_path, index=False)
+                    swap_updated = True
+                    action = "updated"
+                    break
+
+        if not mask.any() and not swap_updated:
+            # 新建条目 — 从赛程 JSON 获取详细信息
+            city = ''
+            country = ''
+            neutral = 'True'
+            if schedule_path.exists():
+                with open(schedule_path, 'r', encoding='utf-8') as f:
+                    sched = json.load(f)
+                for m in sched.get('matches', []):
+                    if match_id and m.get('match_id') == match_id:
+                        city = m.get('city', '')
+                        country = m.get('country', '')
+                        neutral = 'True' if m.get('phase') != 'group' else ('False' if m.get('country') in ('United States', 'Canada', 'Mexico') else 'True')
+                        break
+                    elif not match_id and m['date'] == match_date and m['home_team'] == home_team and m['away_team'] == away_team:
+                        city = m.get('city', '')
+                        country = m.get('country', '')
+                        break
+
+            new_row = pd.DataFrame([{
+                'date': match_date,
+                'home_team': home_team,
+                'away_team': away_team,
+                'home_score': home_score,
+                'away_score': away_score,
+                'tournament': 'FIFA World Cup',
+                'city': city,
+                'country': country,
+                'neutral': neutral,
+            }])
+            df = pd.concat([df, new_row], ignore_index=True)
+            df['date'] = df['date'].dt.strftime('%Y-%m-%d')
+            df = df.sort_values('date').reset_index(drop=True)
+            df.to_csv(csv_path, index=False)
+            action = "created"
+
+        # 如果有全局 predictor，同步更新内存中的 matches_df
+        global predictor
+        if predictor is not None:
+            try:
+                # 重新读取以保持同步
+                fresh_df = pd.read_csv(csv_path)
+                fresh_df['date'] = pd.to_datetime(fresh_df['date'])
+                predictor.matches_df = fresh_df
+            except Exception:
+                pass
+
         return {
             "status": "ok",
-            "message": f"已更新: {home_team} {home_score}-{away_score} {away_team}",
+            "action": action,
+            "message": f"{'已更新' if action == 'updated' else '已新增'}: {home_team} {home_score}-{away_score} {away_team} ({match_date})",
         }
     except HTTPException:
         raise

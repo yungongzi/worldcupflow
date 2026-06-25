@@ -402,8 +402,34 @@ class WorldCupPredictor:
                 m[t] = group
         return m
 
+    # 队名归一化映射（处理 ESPN/CSV 与赛程 JSON 中的拼写差异）
+    _TEAM_NAME_ALIASES = {
+        "Côte d'Ivoire": "Ivory Coast",
+        "Türkiye": "Turkey",
+        "Czechia": "Czech Republic",
+        "Korea Republic": "South Korea",
+        "Cape Verde Islands": "Cape Verde",
+        "United Korea Republic": "South Korea",
+    }
+
+    @classmethod
+    def _normalize_team(cls, name: str) -> str:
+        """归一化球队名称"""
+        if not name or name == 'TBD':
+            return name
+        return cls._TEAM_NAME_ALIASES.get(name, name)
+
+    @classmethod
+    def _build_score_lookup_key(cls, date_str: str, home: str, away: str) -> str:
+        """构建比分查找键（忽略队名大小写差异）"""
+        n_home = cls._normalize_team(home).lower() if home else ''
+        n_away = cls._normalize_team(away).lower() if away else ''
+        return f"{date_str}|{n_home}|{n_away}"
+
     def get_full_schedule(self):
         """返回 2026 世界杯完整赛程（小组赛 + 淘汰赛），含开球时间和时区"""
+        from datetime import timedelta
+
         # 读取赛程 JSON（包含所有 104 场比赛的开球时间、时区偏移、场馆）
         schedule_file = DATA_DIR / 'wc2026_schedule.json'
         if not schedule_file.exists():
@@ -418,26 +444,95 @@ class WorldCupPredictor:
             (self.matches_df['date'].dt.year >= 2026)
         ].sort_values('date')
 
-        # 构建 (date, home_team, away_team) → scores 映射
-        score_map = {}
+        # 构建多层索引的 score_map：
+        # 1) 精确匹配 (date, home, away)
+        # 2) 归一化匹配 (date, norm_home, norm_away) 用于跨别名
+        # 3) 归一化 + 互换匹配 (date, norm_away, norm_home) 用于主客互换
+        # 4) 跨 ±1 天匹配（处理 UTC 时区导致的日期差）
+        score_map = {}       # 精确匹配
+        norm_score_map = {}  # 归一化匹配
+        swap_score_map = {}  # 归一化互换匹配
+
         for _, m in wc.iterrows():
             has_result = pd.notna(m['home_score']) and pd.notna(m['away_score'])
-            key = (m['date'].strftime('%Y-%m-%d'), m['home_team'], m['away_team'])
-            score_map[key] = {
+            date_str = m['date'].strftime('%Y-%m-%d')
+            home_team = m['home_team']
+            away_team = m['away_team']
+
+            info = {
                 'home_score': int(m['home_score']) if has_result else None,
                 'away_score': int(m['away_score']) if has_result else None,
                 'played': has_result,
+                'source_date': date_str,
             }
+
+            # 精确 key
+            score_map[(date_str, home_team, away_team)] = info
+            # 归一化 key
+            norm_key = (date_str, self._normalize_team(home_team), self._normalize_team(away_team))
+            if norm_key not in norm_score_map or not norm_score_map[norm_key].get('played'):
+                norm_score_map[norm_key] = info
+            # 互换 key（主客队可能被 ESPN 反了）
+            swap_key = (date_str, self._normalize_team(away_team), self._normalize_team(home_team))
+            if swap_key not in swap_score_map:
+                swap_score_map[swap_key] = {
+                    'home_score': info['away_score'],
+                    'away_score': info['home_score'],
+                    'played': info['played'],
+                    'source_date': date_str,
+                }
+
+        def lookup_score(sched_date, sched_home, sched_away):
+            """多策略查找比分：
+            1. 精确匹配
+            2. 归一化匹配
+            3. 归一化 + 主客互换
+            4. 跨 ±2 天归一化匹配（处理时区差）
+            """
+            # 1. 精确
+            key = (sched_date, sched_home, sched_away)
+            if key in score_map:
+                return score_map[key]
+
+            # 2. 归一化
+            norm_key = (sched_date, self._normalize_team(sched_home), self._normalize_team(sched_away))
+            if norm_key in norm_score_map:
+                return norm_score_map[norm_key]
+
+            # 3. 归一化 + 互换
+            swap_key = (sched_date, self._normalize_team(sched_away), self._normalize_team(sched_home))
+            if swap_key in swap_score_map:
+                return swap_score_map[swap_key]
+
+            # 4. 跨 ±2 天（时区差 + 数据录入日期偏差）
+            from datetime import datetime as dt
+            try:
+                base_date = dt.strptime(sched_date, '%Y-%m-%d')
+            except ValueError:
+                return {'home_score': None, 'away_score': None, 'played': False}
+
+            for delta_days in [1, -1, 2, -2]:
+                alt_date = (base_date + timedelta(days=delta_days)).strftime('%Y-%m-%d')
+                # 归一化正向
+                alt_key = (alt_date, self._normalize_team(sched_home), self._normalize_team(sched_away))
+                if alt_key in norm_score_map and norm_score_map[alt_key].get('played'):
+                    return norm_score_map[alt_key]
+                # 归一化互换
+                alt_swap_key = (alt_date, self._normalize_team(sched_away), self._normalize_team(sched_home))
+                if alt_swap_key in swap_score_map and swap_score_map[alt_swap_key].get('played'):
+                    return swap_score_map[alt_swap_key]
+
+            return {'home_score': None, 'away_score': None, 'played': False}
 
         all_matches = []
         for m in sched_data['matches']:
-            key = (m['date'], m['home_team'], m['away_team'])
-            score_info = score_map.get(key, {'home_score': None, 'away_score': None, 'played': False})
-
             home_team = m['home_team']
             away_team = m['away_team']
+            score_info = lookup_score(m['date'], home_team, away_team)
+
             all_matches.append({
                 'date': m['datetime'],  # 完整 ISO 时间（含时区偏移）
+                'match_id': m.get('match_id', 0),
                 'phase': m['phase'],
                 'phase_zh': m['phase_zh'],
                 'group': m.get('group', ''),
