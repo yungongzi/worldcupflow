@@ -33,6 +33,9 @@ class WorldCupPredictor:
         self.outcome_model = None
         self.home_score_model = None
         self.away_score_model = None
+        self.agg_outcome_model = None
+        self.agg_home_score_model = None
+        self.agg_away_score_model = None
         self.feature_columns = None
         self.elo_ratings = None
         self.matches_df = None
@@ -40,6 +43,7 @@ class WorldCupPredictor:
         self.metadata = None
         self.version = version
         self._version_manager = ModelVersionManager(MODEL_DIR)
+        self.has_aggressive = False  # 标记激进模型是否可用
         self.load()
 
     @property
@@ -66,6 +70,22 @@ class WorldCupPredictor:
 
         self.away_score_model = xgb.XGBRegressor()
         self.away_score_model.load_model(load_dir / 'away_score_model.json')
+
+        # 尝试加载激进模型（如果存在）
+        agg_outcome_path = load_dir / 'aggressive_outcome_model.json'
+        agg_home_path = load_dir / 'aggressive_home_score_model.json'
+        agg_away_path = load_dir / 'aggressive_away_score_model.json'
+        if agg_outcome_path.exists() and agg_home_path.exists() and agg_away_path.exists():
+            self.agg_outcome_model = xgb.XGBClassifier()
+            self.agg_outcome_model.load_model(agg_outcome_path)
+            self.agg_home_score_model = xgb.XGBRegressor()
+            self.agg_home_score_model.load_model(agg_home_path)
+            self.agg_away_score_model = xgb.XGBRegressor()
+            self.agg_away_score_model.load_model(agg_away_path)
+            self.has_aggressive = True
+            print(f"[加载] 激进模型已加载 (Tweedie + 放松正则化)")
+        else:
+            print(f"[加载] 未找到激进模型，predict_both 将回退到启发式调整")
 
         # 特征列
         with open(load_dir / 'feature_columns.json', 'r', encoding='utf-8') as f:
@@ -100,6 +120,89 @@ class WorldCupPredictor:
             )
         print(f"[加载] 完成. 共 {len(self.elo_ratings)} 支球队有Elo等级分")
 
+        # 计算 WC2026 赛事统计（用于激进模式调整）
+        self._compute_tournament_stats()
+
+    def _compute_tournament_stats(self):
+        """计算 WC2026 赛事统计数据：场均进球、各队偏差"""
+        wc2026 = self.matches_df[
+            (self.matches_df['tournament'] == 'FIFA World Cup') &
+            (self.matches_df['date'].dt.year >= 2026) &
+            self.matches_df['home_score'].notna()
+        ].copy()
+        wc2026['home_score'] = wc2026['home_score'].astype(int)
+        wc2026['away_score'] = wc2026['away_score'].astype(int)
+
+        if len(wc2026) >= 3:
+            self._wc2026_avg_goals = float((wc2026['home_score'] + wc2026['away_score']).mean())
+        else:
+            self._wc2026_avg_goals = 2.8  # 默认值：世界杯历史均值偏上
+
+        # 历史场均进球（所有数据）
+        all_with_scores = self.matches_df.dropna(subset=['home_score', 'away_score'])
+        all_with_scores.loc[:, 'home_score'] = all_with_scores['home_score'].astype(int)
+        all_with_scores.loc[:, 'away_score'] = all_with_scores['away_score'].astype(int)
+        self._historical_avg_goals = float((all_with_scores['home_score'] + all_with_scores['away_score']).mean()) if len(all_with_scores) > 0 else 2.6
+
+        # 各队 WC2026 进球/失球统计
+        self._wc2026_team_goals = {}
+        for _, m in wc2026.iterrows():
+            home = m['home_team']
+            away = m['away_team']
+            hs = int(m['home_score'])
+            aws = int(m['away_score'])
+            # 主队
+            if home not in self._wc2026_team_goals:
+                self._wc2026_team_goals[home] = {'gf': 0, 'ga': 0, 'games': 0}
+            self._wc2026_team_goals[home]['gf'] += hs
+            self._wc2026_team_goals[home]['ga'] += aws
+            self._wc2026_team_goals[home]['games'] += 1
+            # 客队
+            if away not in self._wc2026_team_goals:
+                self._wc2026_team_goals[away] = {'gf': 0, 'ga': 0, 'games': 0}
+            self._wc2026_team_goals[away]['gf'] += aws
+            self._wc2026_team_goals[away]['ga'] += hs
+            self._wc2026_team_goals[away]['games'] += 1
+
+        # 各队历史场均进球（从 matches_df 汇总）
+        self._team_historical_avg = {}
+        for team in set(all_with_scores['home_team'].unique()) | set(all_with_scores['away_team'].unique()):
+            home_mask = all_with_scores['home_team'] == team
+            away_mask = all_with_scores['away_team'] == team
+            total_gf = int(all_with_scores.loc[home_mask, 'home_score'].sum()) + int(all_with_scores.loc[away_mask, 'away_score'].sum())
+            total_games = home_mask.sum() + away_mask.sum()
+            if total_games > 0:
+                self._team_historical_avg[team] = total_gf / total_games
+
+        # 通胀因子：WC2026 场均进球 / 历史场均进球
+        self._goal_inflation = max(1.0, self._wc2026_avg_goals / max(self._historical_avg_goals, 1.0))
+        print(f"[加载] 赛事统计: WC2026 场均={self._wc2026_avg_goals:.2f}球, "
+              f"历史均值={self._historical_avg_goals:.2f}球, 通胀因子={self._goal_inflation:.2f}x")
+
+    def _get_team_wc2026_scoring_rate(self, team: str) -> float:
+        """获取球队在 WC2026 的场均进球率"""
+        if team in self._wc2026_team_goals:
+            stats = self._wc2026_team_goals[team]
+            return stats['gf'] / max(stats['games'], 1)
+        return 0.0
+
+    def _get_team_historical_scoring_rate(self, team: str) -> float:
+        """获取球队历史场均进球率"""
+        return self._team_historical_avg.get(team, 1.2)
+
+    def _get_team_form_deviation(self, team: str) -> float:
+        """
+        计算球队近期进球偏差:
+        >1: WC2026 比历史更猛 (激进上修)
+        <1: WC2026 比历史更弱 (保持原样)
+        """
+        wc26_rate = self._get_team_wc2026_scoring_rate(team)
+        hist_rate = self._get_team_historical_scoring_rate(team)
+        if wc26_rate > 0 and hist_rate > 0:
+            deviation = wc26_rate / hist_rate
+            return max(0.8, min(deviation, 2.5))  # clamp到 [0.8, 2.5]
+        return 1.0  # 没有 WC2026 数据，用 1.0 (不调整)
+
     def reload(self, version: str = None):
         """
         重新加载模型（切换版本）。
@@ -116,18 +219,71 @@ class WorldCupPredictor:
     def predict(self, home_team: str, away_team: str,
                 tournament: str = 'FIFA World Cup',
                 neutral: bool = True,
-                date: datetime = None) -> dict:
+                date: datetime = None,
+                mode: str = 'conservative') -> dict:
         """
         预测一场比赛
+        Args:
+            mode: 'conservative' (默认, 保守) 或 'aggressive' (激进)
+        返回：胜平负概率、预测比分、解释、胜率
+        """
+        if mode == 'aggressive':
+            return self._predict_aggressive(home_team, away_team, tournament, neutral, date)
+        return self._predict_conservative(home_team, away_team, tournament, neutral, date)
+
+    def predict_both(self, home_team: str, away_team: str,
+                     tournament: str = 'FIFA World Cup',
+                     neutral: bool = True,
+                     date: datetime = None) -> dict:
+        """同时返回保守和激进两种预测"""
+        conservative = self._predict_conservative(home_team, away_team, tournament, neutral, date)
+        aggressive = self._predict_aggressive(home_team, away_team, tournament, neutral, date)
+        return {
+            'home_team': conservative['home_team'],
+            'away_team': conservative['away_team'],
+            'home_team_zh': conservative['home_team_zh'],
+            'away_team_zh': conservative['away_team_zh'],
+            'conservative': {
+                'probabilities': conservative['probabilities'],
+                'predicted_score': conservative['predicted_score'],
+                'top_scores': conservative['top_scores'],
+                'win_rates': conservative['win_rates'],
+                'elo_ratings': conservative['elo_ratings'],
+                'explanation': conservative['explanation'],
+            },
+            'aggressive': {
+                'probabilities': aggressive['probabilities'],
+                'predicted_score': aggressive['predicted_score'],
+                'top_scores': aggressive['top_scores'],
+                'win_rates': aggressive['win_rates'],
+                'elo_ratings': aggressive['elo_ratings'],
+                'explanation': aggressive['explanation'],
+            },
+            'tournament': tournament,
+            'neutral': neutral,
+            'predict_time': datetime.now().isoformat(),
+            'adjustment_factors': {
+                'tournament_inflation': round(self._goal_inflation, 2),
+                'wc2026_avg_goals': round(self._wc2026_avg_goals, 2),
+                'historical_avg_goals': round(self._historical_avg_goals, 2),
+                'home_form_deviation': round(self._get_team_form_deviation(home_team), 2),
+                'away_form_deviation': round(self._get_team_form_deviation(away_team), 2),
+            },
+        }
+
+    def _predict_conservative(self, home_team: str, away_team: str,
+                              tournament: str = 'FIFA World Cup',
+                              neutral: bool = True,
+                              date: datetime = None) -> dict:
+        """
+        保守预测（原始模型，不做任何调整）
         返回：胜平负概率、预测比分、解释、胜率
         """
         if date is None:
             date = datetime.now()
 
         # 构建特征
-        features = self.feature_builder.build_features_for_match(
-            home_team, away_team, date, tournament, neutral
-        )
+        features = self._build_feature_vector(home_team, away_team, tournament, neutral, date)
 
         # 转成DataFrame（按训练时的列顺序）
         feat_df = pd.DataFrame([features])
@@ -310,6 +466,235 @@ class WorldCupPredictor:
         # 5. 预测比分说明
         top_score = top_scores[0]
         parts.append(f"🎯 预测最可能比分 {top_score['score']}（概率 {top_score['probability']*100:.1f}%），主队期望进球 {hg_pred:.2f}，客队期望进球 {ag_pred:.2f}")
+
+        return parts
+
+    def _build_feature_vector(self, home_team: str, away_team: str,
+                               tournament: str = 'FIFA World Cup',
+                               neutral: bool = True,
+                               date: datetime = None) -> dict:
+        """构建特征向量（共享方法，保守和激进模型都用）"""
+        if date is None:
+            date = datetime.now()
+        return self.feature_builder.build_features_for_match(
+            home_team, away_team, date, tournament, neutral
+        )
+
+    def _predict_aggressive(self, home_team: str, away_team: str,
+                            tournament: str = 'FIFA World Cup',
+                            neutral: bool = True,
+                            date: datetime = None) -> dict:
+        """激进预测 — 使用 Tweedie + 放松正则化的独立模型推理"""
+        if not self.has_aggressive:
+            # 回退到启发式调整（旧行为）
+            return self._predict_aggressive_heuristic(home_team, away_team, tournament, neutral, date)
+
+        # 构建特征向量（与保守模型共享）
+        features = self._build_feature_vector(home_team, away_team, tournament, neutral, date)
+
+        # 构建 DataFrame 用于 XGBoost 推理
+        X = pd.DataFrame([features])[self.feature_columns]
+
+        # 激进胜平负预测
+        outcome_proba = self.agg_outcome_model.predict_proba(X)[0]
+        # XGBoost 输出 [客胜, 平, 主胜] 对应 label 0,1,2
+        away_win_prob = float(outcome_proba[0])
+        draw_prob = float(outcome_proba[1])
+        home_win_prob = float(outcome_proba[2])
+
+        # 激进进球期望
+        home_lambda = float(max(0, self.agg_home_score_model.predict(X)[0]))
+        away_lambda = float(max(0, self.agg_away_score_model.predict(X)[0]))
+
+        # 计算比分概率矩阵（Tweedie 给期望值，仍需 Poisson 矩阵算分布）
+        score_matrix = self._compute_score_probability_matrix(home_lambda, away_lambda)
+        top_scores = self._top_scores(score_matrix, n=5)
+
+        # 预测比分（期望值取整）
+        home_goals = max(0, int(round(home_lambda)))
+        away_goals = max(0, int(round(away_lambda)))
+
+        # 综合胜率
+        home_win_rate = home_win_prob + 0.5 * draw_prob
+        away_win_rate = away_win_prob + 0.5 * draw_prob
+
+        # 解释（包含激进模型特有信息）
+        explanation = self._generate_aggressive_explanation_v2(
+            home_team, away_team, features, home_win_prob, draw_prob, away_win_prob,
+            home_lambda, away_lambda, top_scores, tournament
+        )
+
+        return {
+            'home_team': home_team,
+            'away_team': away_team,
+            'home_team_zh': get_chinese_name(home_team),
+            'away_team_zh': get_chinese_name(away_team),
+            'probabilities': {
+                'home_win': round(home_win_prob, 4),
+                'draw': round(draw_prob, 4),
+                'away_win': round(away_win_prob, 4),
+            },
+            'predicted_score': {
+                'home': home_goals,
+                'away': away_goals,
+                'home_expected': round(home_lambda, 2),
+                'away_expected': round(away_lambda, 2),
+            },
+            'top_scores': top_scores,
+            'win_rates': {
+                'home': round(home_win_rate, 4),
+                'away': round(away_win_rate, 4),
+            },
+            'elo_ratings': {
+                'home': round(features['elo_home'], 1),
+                'away': round(features['elo_away'], 1),
+                'diff': round(features['elo_diff'], 1),
+            },
+            'features': features,
+            'explanation': explanation,
+            'tournament': tournament,
+            'neutral': neutral,
+            'predict_time': datetime.now().isoformat(),
+            'model_type': 'tweedie_aggressive',
+            'adjustment_factors': {
+                'tournament_avg_goals': round(features.get('tournament_avg_goals', 2.6), 2),
+                'home_tournament_attack_bias': round(features.get('home_tournament_attack_bias', 1.0), 2),
+                'away_tournament_attack_bias': round(features.get('away_tournament_attack_bias', 1.0), 2),
+            },
+        }
+
+    def _predict_aggressive_heuristic(self, home_team: str, away_team: str,
+                                       tournament: str = 'FIFA World Cup',
+                                       neutral: bool = True,
+                                       date: datetime = None) -> dict:
+        """激进预测回退方案 — 基于保守预测 + 赛事走势调整（无独立激进模型时使用）"""
+        # 1. 先获取保守预测作为基准
+        base = self._predict_conservative(home_team, away_team, tournament, neutral, date)
+
+        # 2. 计算调整因子
+        inflation = self._goal_inflation
+        home_dev = self._get_team_form_deviation(home_team)
+        away_dev = self._get_team_form_deviation(away_team)
+
+        # 3. 调整期望进球
+        lambda_h_base = base['predicted_score']['home_expected']
+        lambda_a_base = base['predicted_score']['away_expected']
+
+        lambda_h_adj = lambda_h_base * inflation * home_dev
+        lambda_a_adj = lambda_a_base * inflation * away_dev
+
+        lambda_h_agg = 0.4 * lambda_h_base + 0.6 * max(lambda_h_base, lambda_h_adj)
+        lambda_a_agg = 0.4 * lambda_a_base + 0.6 * max(lambda_a_base, lambda_a_adj)
+
+        lambda_h_agg = min(lambda_h_agg, lambda_h_base * 2.5)
+        lambda_a_agg = min(lambda_a_agg, lambda_a_base * 2.5)
+
+        # 4. 调整胜平负概率
+        home_win = base['probabilities']['home_win']
+        draw = base['probabilities']['draw']
+        away_win = base['probabilities']['away_win']
+
+        draw_discount = 0.7
+        draw_adj = draw * draw_discount
+        freed_prob = draw - draw_adj
+
+        if home_win > away_win:
+            advantage_ratio = home_win / max(home_win + away_win, 0.01)
+        else:
+            advantage_ratio = 1 - (home_win / max(home_win + away_win, 0.01))
+        home_win_adj = home_win + freed_prob * advantage_ratio
+        away_win_adj = away_win + freed_prob * (1 - advantage_ratio)
+
+        # 5. 计算比分
+        home_goals_agg = max(0, int(round(lambda_h_agg)))
+        away_goals_agg = max(0, int(round(lambda_a_agg)))
+
+        agg_matrix = self._compute_score_probability_matrix(lambda_h_agg, lambda_a_agg)
+        top_scores_agg = self._top_scores(agg_matrix, n=5)
+
+        home_win_rate_agg = home_win_adj + 0.5 * draw_adj
+        away_win_rate_agg = away_win_adj + 0.5 * draw_adj
+
+        explanation_agg = self._generate_aggressive_explanation_v2(
+            home_team, away_team, base['features'],
+            home_win_adj, draw_adj, away_win_adj,
+            lambda_h_agg, lambda_a_agg, top_scores_agg, tournament
+        )
+        explanation_agg.append(f"💡 [回退模式] 未训练激进模型，使用赛事通胀因子 {inflation:.2f}x + 球队形态偏差调整")
+
+        return {
+            'home_team': home_team,
+            'away_team': away_team,
+            'home_team_zh': get_chinese_name(home_team),
+            'away_team_zh': get_chinese_name(away_team),
+            'probabilities': {
+                'home_win': round(home_win_adj, 4),
+                'draw': round(draw_adj, 4),
+                'away_win': round(away_win_adj, 4),
+            },
+            'predicted_score': {
+                'home': home_goals_agg,
+                'away': away_goals_agg,
+                'home_expected': round(lambda_h_agg, 2),
+                'away_expected': round(lambda_a_agg, 2),
+            },
+            'top_scores': top_scores_agg,
+            'win_rates': {
+                'home': round(home_win_rate_agg, 4),
+                'away': round(away_win_rate_agg, 4),
+            },
+            'elo_ratings': base['elo_ratings'],
+            'features': base['features'],
+            'explanation': explanation_agg,
+            'tournament': tournament,
+            'neutral': neutral,
+            'predict_time': datetime.now().isoformat(),
+            'model_type': 'heuristic_aggressive',
+            'adjustment_factors': {
+                'tournament_inflation': round(inflation, 2),
+                'home_form_deviation': round(home_dev, 2),
+                'away_form_deviation': round(away_dev, 2),
+                'lambda_h_original': round(lambda_h_base, 2),
+                'lambda_a_original': round(lambda_a_base, 2),
+                'lambda_h_adjusted': round(lambda_h_agg, 2),
+                'lambda_a_adjusted': round(lambda_a_agg, 2),
+            },
+        }
+
+    def _generate_aggressive_explanation_v2(self, home_team, away_team, features,
+                                             home_win, draw, away_win,
+                                             home_lambda, away_lambda, top_scores,
+                                             tournament):
+        """生成激进预测解释（v2: 基于真实 Tweedie 模型）"""
+        home_zh = get_chinese_name(home_team)
+        away_zh = get_chinese_name(away_team)
+        parts = []
+
+        parts.append(f"🔥【激进模式】Tweedie 模型 + 赛事走势特征")
+
+        # 赛事走势
+        tour_avg = features.get('tournament_avg_goals', 2.6)
+        tour_over_rate = features.get('tournament_over_2_5_rate', 0.5)
+        if features.get('tournament_match_count', 0) >= 3:
+            parts.append(f"📊 {tournament} 场均 {tour_avg:.1f} 球，大2.5率 {tour_over_rate*100:.0f}%")
+
+        # 球队赛事火力偏差
+        home_bias = features.get('home_tournament_attack_bias', 1.0)
+        away_bias = features.get('away_tournament_attack_bias', 1.0)
+        if home_bias > 1.15:
+            parts.append(f"⚡ {home_zh} 本届进球率比生涯高 {((home_bias-1)*100):.0f}%")
+        if away_bias > 1.15:
+            parts.append(f"⚡ {away_zh} 本届进球率比生涯高 {((away_bias-1)*100):.0f}%")
+
+        # 概率
+        parts.append(f"🎯 胜平负: {home_zh} {home_win*100:.1f}% | 平 {draw*100:.1f}% | {away_zh} {away_win*100:.1f}%")
+
+        # 期望进球
+        parts.append(f"🥅 期望进球: {home_zh} {home_lambda:.2f} vs {away_zh} {away_lambda:.2f}")
+
+        # 最可能比分
+        if top_scores:
+            parts.append(f"📊 最可能比分: {top_scores[0]['score']}（{top_scores[0]['probability']*100:.1f}%）")
 
         return parts
 

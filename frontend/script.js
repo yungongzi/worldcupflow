@@ -284,6 +284,12 @@ function renderLiveCard(m) {
     const homePct = Math.round(p.home_win * 100);
     const drawPct = Math.round(p.draw * 100);
     const awayPct = Math.round(p.away_win * 100);
+
+    // 激进预测范围（如有）
+    const aggRange = p.aggressive_score && p.aggressive_score !== p.predicted_score
+      ? `<span class="predicted-score agg-range" title="激进预测">→ ${p.aggressive_score}</span>`
+      : '';
+
     predHTML = `
       <div class="match-prediction">
         <div class="prediction-label">AI 预测</div>
@@ -293,7 +299,7 @@ function renderLiveCard(m) {
           <div class="prob-segment prob-away" style="flex: ${awayPct};">${awayPct >= 12 ? awayPct + '%' : ''}</div>
         </div>
         <div class="prediction-detail">
-          <span>预测比分: <span class="predicted-score">${p.predicted_score}</span></span>
+          <span>预测比分: <span class="predicted-score">${p.predicted_score}</span> ${aggRange}</span>
           <span style="color: var(--accent-gold);">Elo差: ${p.elo_diff > 0 ? '+' : ''}${p.elo_diff.toFixed(0)}</span>
         </div>
       </div>
@@ -369,10 +375,10 @@ async function predictMatch() {
   try {
     const tournament = $('#tournamentSelect').value;
     const neutral = $('#neutralSelect').value === 'true';
-    const url = `${API}/predict?home=${encodeURIComponent(state.homeTeam)}&away=${encodeURIComponent(state.awayTeam)}&tournament=${encodeURIComponent(tournament)}&neutral=${neutral}`;
-    const pred = await fetchJSON(url);
+    const url = `${API}/predict?home=${encodeURIComponent(state.homeTeam)}&away=${encodeURIComponent(state.awayTeam)}&tournament=${encodeURIComponent(tournament)}&neutral=${neutral}&mode=both`;
+    const data = await fetchJSON(url);
 
-    resultDiv.innerHTML = renderPrediction(pred);
+    resultDiv.innerHTML = renderPrediction(data);
   } catch (e) {
     resultDiv.innerHTML = `
       <div class="predict-placeholder">
@@ -387,16 +393,22 @@ async function predictMatch() {
 }
 
 function renderPrediction(p) {
-  const probs = p.probabilities;
+  // 检测是否为双预测格式 (predict_both 返回值)
+  const isDual = !!(p.conservative && p.aggressive);
+  const cons = isDual ? p.conservative : p;
+  const agg = isDual ? p.aggressive : null;
+  const adjFactors = isDual ? (p.adjustment_factors || {}) : {};
+
+  const probs = cons.probabilities;
   const homePct = (probs.home_win * 100).toFixed(1);
   const drawPct = (probs.draw * 100).toFixed(1);
   const awayPct = (probs.away_win * 100).toFixed(1);
 
-  const totalElo = p.elo_ratings.home + p.elo_ratings.away;
-  const homeEloPct = (p.elo_ratings.home / totalElo * 100).toFixed(1);
+  const totalElo = cons.elo_ratings.home + cons.elo_ratings.away;
+  const homeEloPct = (cons.elo_ratings.home / totalElo * 100).toFixed(1);
   const awayEloPct = 100 - homeEloPct;
 
-  const topScoresHTML = p.top_scores.map((s, i) => `
+  const topScoresHTML = cons.top_scores.map((s, i) => `
     <div class="top-score-item">
       <div class="top-score-rank">#${i+1}</div>
       <div class="top-score-value">${s.score}</div>
@@ -404,9 +416,120 @@ function renderPrediction(p) {
     </div>
   `).join('');
 
-  const explanationHTML = p.explanation.map(e => `
+  const explanationHTML = cons.explanation.map(e => `
     <div class="explanation-item">${e}</div>
   `).join('');
+
+  // 激进预测区域（仅双预测模式显示）
+  let aggressiveHTML = '';
+  if (agg) {
+    const aggProbs = agg.probabilities;
+    const aggTopScoresHTML = agg.top_scores.map((s, i) => `
+      <div class="top-score-item agg">
+        <div class="top-score-rank">#${i+1}</div>
+        <div class="top-score-value">${s.score}</div>
+        <div class="top-score-prob">${(s.probability * 100).toFixed(1)}%</div>
+      </div>
+    `).join('');
+
+    const aggExplanationHTML = agg.explanation.map(e => `
+      <div class="explanation-item agg">${e}</div>
+    `).join('');
+
+    // 调整因子说明
+    const inflationNote = adjFactors.tournament_inflation > 1.05
+      ? `本届场均 ${(adjFactors.tournament_inflation * (adjFactors.wc2026_avg_goals || 2.6)).toFixed(1)} 球（历史${adjFactors.historical_avg_goals || 2.6}球），通胀 ${adjFactors.tournament_inflation?.toFixed(2) || '-'}x`
+      : '';
+
+    const formNotes = [];
+    if (adjFactors.home_form_deviation > 1.1) formNotes.push(`${p.home_team_zh} 进球率高于历史 x${adjFactors.home_form_deviation?.toFixed(1)}`);
+    if (adjFactors.away_form_deviation > 1.1) formNotes.push(`${p.away_team_zh} 进球率高于历史 x${adjFactors.away_form_deviation?.toFixed(1)}`);
+    const formNote = formNotes.length > 0 ? formNotes.join('；') : '';
+
+    aggressiveHTML = `
+      <div class="dual-prediction-section">
+        <div class="dual-section-title">
+          <span>⚡ 激进预测（基于本届走势）</span>
+          ${inflationNote ? `<span class="dual-inflation-badge">${inflationNote}</span>` : ''}
+          ${formNote ? `<span class="dual-inflation-badge" style="background:rgba(255,107,53,0.2);">${formNote}</span>` : ''}
+        </div>
+
+        <div class="dual-pred-grid">
+          <div class="dual-pred-card conservative">
+            <div class="dual-pred-label">🛡️ 保守预测</div>
+            <div class="dual-pred-score">${cons.predicted_score.home} - ${cons.predicted_score.away}</div>
+            <div class="dual-pred-expected">期望 ${cons.predicted_score.home_expected?.toFixed(2)} - ${cons.predicted_score.away_expected?.toFixed(2)}</div>
+            <div class="dual-prob-row">
+              <span class="prob-dot" style="background:var(--accent-success);"></span>胜 ${(cons.probabilities.home_win * 100).toFixed(0)}%
+              <span class="prob-dot" style="background:var(--accent-warning);"></span>平 ${(cons.probabilities.draw * 100).toFixed(0)}%
+              <span class="prob-dot" style="background:var(--accent-danger);"></span>负 ${(cons.probabilities.away_win * 100).toFixed(0)}%
+            </div>
+          </div>
+          <div class="dual-pred-card aggressive">
+            <div class="dual-pred-label">🔥 激进预测</div>
+            <div class="dual-pred-score agg-score">${agg.predicted_score.home} - ${agg.predicted_score.away}</div>
+            <div class="dual-pred-expected">期望 ${agg.predicted_score.home_expected?.toFixed(2)} - ${agg.predicted_score.away_expected?.toFixed(2)}</div>
+            <div class="dual-prob-row">
+              <span class="prob-dot" style="background:var(--accent-success);"></span>胜 ${(aggProbs.home_win * 100).toFixed(0)}%
+              <span class="prob-dot" style="background:var(--accent-warning);"></span>平 ${(aggProbs.draw * 100).toFixed(0)}%
+              <span class="prob-dot" style="background:var(--accent-danger);"></span>负 ${(aggProbs.away_win * 100).toFixed(0)}%
+            </div>
+          </div>
+        </div>
+
+        <div class="dual-top-scores">
+          <div style="flex:1">
+            <div class="dual-section-subtitle">保守 Top 3 比分</div>
+            ${cons.top_scores.slice(0, 3).map(s => `
+              <div class="top-score-item">${s.score} <span class="top-score-prob">${(s.probability * 100).toFixed(1)}%</span></div>
+            `).join('')}
+          </div>
+          <div style="flex:1">
+            <div class="dual-section-subtitle">激进 Top 3 比分</div>
+            ${agg.top_scores.slice(0, 3).map(s => `
+              <div class="top-score-item agg">${s.score} <span class="top-score-prob">${(s.probability * 100).toFixed(1)}%</span></div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // 单预测模式下的 Top 5（向后兼容）
+  const topScoresSection = !isDual ? `
+    <div class="result-section-title">Top 5 最可能比分</div>
+    <div class="top-scores">${topScoresHTML}</div>
+  ` : '';
+
+  const scorePredSection = !isDual ? `
+    <div class="result-section-title">预测比分 & 期望进球</div>
+    <div class="score-prediction">
+      <div class="score-pred-card">
+        <div class="win-rate-label">${p.home_team_zh}</div>
+        <div class="score-pred-value">${p.predicted_score.home}</div>
+        <div class="score-pred-expected">期望 ${p.predicted_score.home_expected}</div>
+      </div>
+      <div class="score-pred-card">
+        <div class="win-rate-label">${p.away_team_zh}</div>
+        <div class="score-pred-value">${p.predicted_score.away}</div>
+        <div class="score-pred-expected">期望 ${p.predicted_score.away_expected}</div>
+      </div>
+    </div>
+  ` : '';
+
+  const winRateSection = !isDual ? `
+    <div class="result-section-title">综合胜率 (胜+0.5×平)</div>
+    <div class="win-rate-section">
+      <div class="win-rate-card home">
+        <div class="win-rate-label">${p.home_team_zh} 胜率</div>
+        <div class="win-rate-value">${(p.win_rates.home * 100).toFixed(1)}%</div>
+      </div>
+      <div class="win-rate-card away">
+        <div class="win-rate-label">${p.away_team_zh} 胜率</div>
+        <div class="win-rate-value">${(p.win_rates.away * 100).toFixed(1)}%</div>
+      </div>
+    </div>
+  ` : '';
 
   return `
     <div class="result-container">
@@ -416,7 +539,7 @@ function renderPrediction(p) {
             <div class="result-team-name">${p.home_team_zh}</div>
             <div class="result-team-en">${p.home_team}</div>
           </div>
-          <div class="result-vs-score">${p.predicted_score.home} - ${p.predicted_score.away}</div>
+          <div class="result-vs-score">${cons.predicted_score.home} - ${cons.predicted_score.away}</div>
           <div class="result-team">
             <div class="result-team-name">${p.away_team_zh}</div>
             <div class="result-team-en">${p.away_team}</div>
@@ -428,15 +551,18 @@ function renderPrediction(p) {
         </div>
       </div>
 
+      ${isDual ? '' : `
       <div class="result-section-title">Elo 等级分对比</div>
       <div class="elo-comparison">
-        <div class="elo-team-label home">${p.elo_ratings.home.toFixed(0)}</div>
+        <div class="elo-team-label home">${cons.elo_ratings.home.toFixed(0)}</div>
         <div class="elo-bar">
           <div class="elo-bar-home" style="width: ${homeEloPct}%;"></div>
         </div>
-        <div class="elo-team-label away">${p.elo_ratings.away.toFixed(0)}</div>
+        <div class="elo-team-label away">${cons.elo_ratings.away.toFixed(0)}</div>
       </div>
+      `}
 
+      ${isDual ? aggressiveHTML : `
       <div class="result-section-title">胜平负概率</div>
       <div class="result-probabilities">
         <div class="big-prob-bar">
@@ -459,41 +585,15 @@ function renderPrediction(p) {
           <span><span class="dot" style="background: var(--accent-danger);"></span>${p.away_team_zh} 胜</span>
         </div>
       </div>
-
-      <div class="result-section-title">综合胜率 (胜+0.5×平)</div>
-      <div class="win-rate-section">
-        <div class="win-rate-card home">
-          <div class="win-rate-label">${p.home_team_zh} 胜率</div>
-          <div class="win-rate-value">${(p.win_rates.home * 100).toFixed(1)}%</div>
-        </div>
-        <div class="win-rate-card away">
-          <div class="win-rate-label">${p.away_team_zh} 胜率</div>
-          <div class="win-rate-value">${(p.win_rates.away * 100).toFixed(1)}%</div>
-        </div>
-      </div>
-
-      <div class="result-section-title">预测比分 & 期望进球</div>
-      <div class="score-prediction">
-        <div class="score-pred-card">
-          <div class="win-rate-label">${p.home_team_zh}</div>
-          <div class="score-pred-value">${p.predicted_score.home}</div>
-          <div class="score-pred-expected">期望 ${p.predicted_score.home_expected}</div>
-        </div>
-        <div class="score-pred-card">
-          <div class="win-rate-label">${p.away_team_zh}</div>
-          <div class="score-pred-value">${p.predicted_score.away}</div>
-          <div class="score-pred-expected">期望 ${p.predicted_score.away_expected}</div>
-        </div>
-      </div>
-
-      <div class="result-section-title">Top 5 最可能比分</div>
-      <div class="top-scores">
-        ${topScoresHTML}
-      </div>
+      ${winRateSection}
+      ${scorePredSection}
+      ${topScoresSection}
+      `}
 
       <div class="result-section-title">AI 分析</div>
       <div class="explanation-list">
         ${explanationHTML}
+        ${agg ? agg.explanation.map(e => `<div class="explanation-item agg">${e}</div>`).join('') : ''}
       </div>
 
       <div class="result-disclaimer">

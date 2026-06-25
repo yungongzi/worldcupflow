@@ -1,5 +1,5 @@
 {
-  "active_version": "v_20260618_202733",
+  "active_version": "v_20260625_183826",
   "versions": [
     {
       "version_id": "v_20260618_202733",
@@ -20,6 +20,63 @@
         "training_date": "2026-06-18T20:27:33.216413",
         "data_latest_date": "2026-06-17T00:00:00",
         "total_teams": 336
+      }
+    },
+    {
+      "version_id": "v_20260625_180456",
+      "created_at": "2026-06-25T18:04:56.736201",
+      "note": "",
+      "metadata": {
+        "start_year": 2002,
+        "test_split_date": "2023-01-01",
+        "train_size": 19673,
+        "test_size": 3652,
+        "feature_count": 49,
+        "outcome_accuracy": 0.5805038335158818,
+        "outcome_log_loss": 0.8810553550720215,
+        "home_score_mae": 1.0280673376611982,
+        "home_score_exact": 0.30366922234392113,
+        "away_score_mae": 0.8405975551759622,
+        "away_score_exact": 0.36856516976998904,
+        "agg_outcome_accuracy": 0.5799561883899234,
+        "agg_outcome_log_loss": 0.8783802390098572,
+        "agg_home_score_mae": 1.0256303849671882,
+        "agg_home_score_exact": 0.3146221248630887,
+        "agg_away_score_mae": 0.836332780643604,
+        "agg_away_score_exact": 0.37650602409638556,
+        "model_mode": "dual",
+        "training_date": "2026-06-25T18:04:56.734199",
+        "data_latest_date": "2026-06-24T00:00:00",
+        "total_teams": 338
+      }
+    },
+    {
+      "version_id": "v_20260625_183826",
+      "created_at": "2026-06-25T18:38:26.500235",
+      "note": "",
+      "metadata": {
+        "start_year": 2002,
+        "split_method": "random_80_20",
+        "data_includes_2026_wc": true,
+        "train_size": 18660,
+        "val_size": 4665,
+        "feature_count": 49,
+        "outcome_accuracy": 0.5554126473740622,
+        "outcome_log_loss": 0.9181029200553894,
+        "home_score_mae": 1.0089783612139611,
+        "home_score_exact": 0.32304394426580924,
+        "away_score_mae": 0.846238096846549,
+        "away_score_exact": 0.36420150053590566,
+        "agg_outcome_accuracy": 0.55005359056806,
+        "agg_outcome_log_loss": 0.9148743152618408,
+        "agg_home_score_mae": 1.0062643488555636,
+        "agg_home_score_exact": 0.3260450160771704,
+        "agg_away_score_mae": 0.8453686823942653,
+        "agg_away_score_exact": 0.3687031082529475,
+        "model_mode": "dual",
+        "training_date": "2026-06-25T18:38:26.499236",
+        "data_latest_date": "2026-06-24T00:00:00",
+        "total_teams": 338
       }
     }
   ]

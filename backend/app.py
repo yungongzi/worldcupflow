@@ -168,11 +168,29 @@ async def predict_match_get(
     away: str = Query(...),
     tournament: str = Query("FIFA World Cup"),
     neutral: bool = Query(True),
+    mode: str = Query("conservative"),
 ):
+    """
+    单场预测
+    mode: conservative (默认) | aggressive | both
+    """
     if predictor is None:
         raise HTTPException(503, "模型尚未加载完成")
     try:
-        return predictor.predict(home, away, tournament, neutral)
+        if mode == 'both':
+            return predictor.predict_both(home, away, tournament, neutral)
+        return predictor.predict(home, away, tournament, neutral, mode=mode)
+    except Exception as e:
+        raise HTTPException(500, f"预测失败: {str(e)}")
+
+
+@app.post("/api/predict/both")
+async def predict_both(req: PredictRequest):
+    """同时返回保守+激进两种预测"""
+    if predictor is None:
+        raise HTTPException(503, "模型尚未加载完成")
+    try:
+        return predictor.predict_both(req.home_team, req.away_team, req.tournament, req.neutral)
     except Exception as e:
         raise HTTPException(500, f"预测失败: {str(e)}")
 
@@ -373,13 +391,16 @@ async def recent_results(limit: int = Query(20, ge=1, le=100)):
 
 @app.get("/api/worldcup/predict-all")
 async def predict_all_worldcup(limit: int = Query(20, ge=1, le=100)):
+    """预测所有即将到来的世界杯比赛 — 同时返回保守和激进两种预测"""
     if predictor is None:
         raise HTTPException(503, "模型尚未加载完成")
     matches = predictor.get_upcoming_world_cup_matches(limit)
     predictions = []
     for m in matches:
         try:
-            pred = predictor.predict(m['home_team'], m['away_team'], 'FIFA World Cup', True)
+            pred_both = predictor.predict_both(m['home_team'], m['away_team'], 'FIFA World Cup', True)
+            cons = pred_both['conservative']
+            agg = pred_both['aggressive']
             predictions.append({
                 'date': m['date'],
                 'home_team': m['home_team'],
@@ -389,12 +410,31 @@ async def predict_all_worldcup(limit: int = Query(20, ge=1, le=100)):
                 'city': m['city'],
                 'country': m['country'],
                 'prediction': {
-                    'home_win': pred['probabilities']['home_win'],
-                    'draw': pred['probabilities']['draw'],
-                    'away_win': pred['probabilities']['away_win'],
-                    'predicted_score': f"{pred['predicted_score']['home']}-{pred['predicted_score']['away']}",
-                    'top_score': pred['top_scores'][0]['score'],
-                    'top_score_prob': pred['top_scores'][0]['probability'],
+                    # 保守预测（保持向后兼容）
+                    'home_win': cons['probabilities']['home_win'],
+                    'draw': cons['probabilities']['draw'],
+                    'away_win': cons['probabilities']['away_win'],
+                    'predicted_score': f"{cons['predicted_score']['home']}-{cons['predicted_score']['away']}",
+                    'predicted_score_home': cons['predicted_score']['home'],
+                    'predicted_score_away': cons['predicted_score']['away'],
+                    'home_expected': cons['predicted_score']['home_expected'],
+                    'away_expected': cons['predicted_score']['away_expected'],
+                    'top_score': cons['top_scores'][0]['score'],
+                    'top_score_prob': cons['top_scores'][0]['probability'],
+                    'elo_diff': cons['elo_ratings']['diff'],
+                    # 激进预测
+                    'aggressive_score': f"{agg['predicted_score']['home']}-{agg['predicted_score']['away']}",
+                    'aggressive_score_home': agg['predicted_score']['home'],
+                    'aggressive_score_away': agg['predicted_score']['away'],
+                    'aggressive_home_expected': agg['predicted_score']['home_expected'],
+                    'aggressive_away_expected': agg['predicted_score']['away_expected'],
+                    'aggressive_home_win': agg['probabilities']['home_win'],
+                    'aggressive_draw': agg['probabilities']['draw'],
+                    'aggressive_away_win': agg['probabilities']['away_win'],
+                    'aggressive_top_score': agg['top_scores'][0]['score'],
+                    'aggressive_top_score_prob': agg['top_scores'][0]['probability'],
+                    # 调整因子
+                    'adjustment_factors': pred_both.get('adjustment_factors', {}),
                 },
             })
         except Exception as e:
@@ -427,15 +467,23 @@ async def live_matches():
         }
         if m.get('status') in ('scheduled', 'live') or m.get('home_score') is None:
             try:
-                pred = predictor.predict(m['home_team'], m['away_team'], 'FIFA World Cup', True)
+                pred_both = predictor.predict_both(m['home_team'], m['away_team'], 'FIFA World Cup', True)
+                cons = pred_both['conservative']
+                agg = pred_both['aggressive']
                 item['prediction'] = {
-                    'home_win': pred['probabilities']['home_win'],
-                    'draw': pred['probabilities']['draw'],
-                    'away_win': pred['probabilities']['away_win'],
-                    'predicted_score': f"{pred['predicted_score']['home']}-{pred['predicted_score']['away']}",
-                    'top_scores': pred['top_scores'][:3],
-                    'explanation': pred['explanation'][:2],
-                    'elo_diff': pred['elo_ratings']['diff'],
+                    # 保守预测（向后兼容）
+                    'home_win': cons['probabilities']['home_win'],
+                    'draw': cons['probabilities']['draw'],
+                    'away_win': cons['probabilities']['away_win'],
+                    'predicted_score': f"{cons['predicted_score']['home']}-{cons['predicted_score']['away']}",
+                    'top_scores': cons['top_scores'][:3],
+                    'explanation': cons['explanation'][:2],
+                    'elo_diff': cons['elo_ratings']['diff'],
+                    # 激进预测
+                    'aggressive_score': f"{agg['predicted_score']['home']}-{agg['predicted_score']['away']}",
+                    'aggressive_home_win': agg['probabilities']['home_win'],
+                    'aggressive_draw': agg['probabilities']['draw'],
+                    'aggressive_away_win': agg['probabilities']['away_win'],
                 }
             except Exception as e:
                 print(f"预测 {m['home_team']} vs {m['away_team']} 失败: {e}")

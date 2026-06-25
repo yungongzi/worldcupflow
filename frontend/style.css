@@ -795,6 +795,13 @@ body {
   color: var(--accent-primary);
 }
 
+.predicted-score.agg-range {
+  color: var(--accent-warning);
+  font-size: 11px;
+  font-weight: 500;
+  margin-left: 2px;
+}
+
 .match-venue {
   font-size: 11px;
   color: var(--text-muted);
@@ -1463,6 +1470,146 @@ body {
 
 .elo-team-label.home { color: var(--accent-success); }
 .elo-team-label.away { color: var(--accent-danger); }
+
+/* ===========================
+   双预测展示（保守 vs 激进）
+   =========================== */
+.dual-prediction-section {
+  margin: 20px 0;
+}
+
+.dual-section-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent-warning);
+}
+
+.dual-inflation-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-primary);
+}
+
+.dual-pred-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.dual-pred-card {
+  padding: 18px;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--glass-border);
+  text-align: center;
+  transition: all var(--transition-base);
+}
+
+.dual-pred-card.conservative {
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.dual-pred-card.aggressive {
+  border-color: rgba(255, 107, 53, 0.4);
+  background: rgba(255, 107, 53, 0.06);
+}
+
+.dual-pred-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+}
+
+.dual-pred-card.aggressive .dual-pred-label {
+  color: var(--accent-warning);
+}
+
+.dual-pred-score {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+}
+
+.dual-pred-score.agg-score {
+  color: var(--accent-warning);
+}
+
+.dual-pred-expected {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.dual-prob-row {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.prob-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 3px;
+  vertical-align: middle;
+}
+
+.dual-top-scores {
+  display: flex;
+  gap: 16px;
+  padding: 14px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-md);
+}
+
+.dual-section-subtitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.top-score-item.agg .top-score-value {
+  color: var(--accent-warning);
+}
+
+.explanation-item.agg {
+  border-left: 2px solid var(--accent-warning);
+  padding-left: 10px;
+  color: var(--accent-warning);
+}
+
+@media (max-width: 640px) {
+  .dual-pred-grid {
+    grid-template-columns: 1fr;
+  }
+  .dual-top-scores {
+    flex-direction: column;
+  }
+}
 
 /* ===========================
    赛程

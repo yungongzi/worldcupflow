@@ -1,0 +1,23 @@
+{
+  "start_year": 2002,
+  "test_split_date": "2023-01-01",
+  "train_size": 19673,
+  "test_size": 3652,
+  "feature_count": 49,
+  "outcome_accuracy": 0.5805038335158818,
+  "outcome_log_loss": 0.8810553550720215,
+  "home_score_mae": 1.0280673376611982,
+  "home_score_exact": 0.30366922234392113,
+  "away_score_mae": 0.8405975551759622,
+  "away_score_exact": 0.36856516976998904,
+  "agg_outcome_accuracy": 0.5799561883899234,
+  "agg_outcome_log_loss": 0.8783802390098572,
+  "agg_home_score_mae": 1.0256303849671882,
+  "agg_home_score_exact": 0.3146221248630887,
+  "agg_away_score_mae": 0.836332780643604,
+  "agg_away_score_exact": 0.37650602409638556,
+  "model_mode": "dual",
+  "training_date": "2026-06-25T18:04:56.734199",
+  "data_latest_date": "2026-06-24T00:00:00",
+  "total_teams": 338
+}

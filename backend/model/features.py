@@ -127,6 +127,10 @@ class MatchFeatureBuilder:
         self.h2h_history = defaultdict(list)
         # 球队最近一次比赛日期
         self.last_match_date = {}
+        # 赛事走势：dict[tournament] = {'goals': [...], 'matches': N}
+        self.tournament_goals = defaultdict(list)
+        # 球队在本届赛事中的表现：dict[(team, tournament)] = {'goals_for': [...], 'goals_against': [...], 'matches': N}
+        self.team_tournament_stats = defaultdict(lambda: {'goals_for': [], 'goals_against': [], 'matches': 0})
 
     def _recent_form(self, team, current_date, n=10):
         """获取球队近n场比赛"""
@@ -226,6 +230,31 @@ class MatchFeatureBuilder:
         # 对战记录
         h2h = self._compute_h2h_features(home_team, away_team, date, n=5)
 
+        # 赛事走势特征（激进模型核心——感知当前赛事进球趋势）
+        tour_goals = self.tournament_goals.get(tournament, [])
+        if len(tour_goals) >= 3:
+            tournament_avg_goals = np.mean(tour_goals)
+            tournament_std_goals = np.std(tour_goals) if len(tour_goals) >= 5 else np.std(tour_goals)
+            tournament_over_2_5_rate = np.mean([1 if g > 2.5 else 0 for g in tour_goals])
+            tournament_match_count = len(tour_goals)
+        else:
+            # 赛事样本太少，使用全局均值
+            tournament_avg_goals = 2.6
+            tournament_std_goals = 1.4
+            tournament_over_2_5_rate = 0.5
+            tournament_match_count = len(tour_goals)
+
+        # 球队本届赛事进球率 vs 生涯均值
+        home_tour_key = (home_team, tournament)
+        away_tour_key = (away_team, tournament)
+        home_tour_stats = self.team_tournament_stats.get(home_tour_key, {'goals_for': [], 'goals_against': [], 'matches': 0})
+        away_tour_stats = self.team_tournament_stats.get(away_tour_key, {'goals_for': [], 'goals_against': [], 'matches': 0})
+
+        home_tour_gf_avg = np.mean(home_tour_stats['goals_for']) if home_tour_stats['goals_for'] else form_h['form_10_goals_scored_avg']
+        home_tour_ga_avg = np.mean(home_tour_stats['goals_against']) if home_tour_stats['goals_against'] else form_h['form_10_goals_conceded_avg']
+        away_tour_gf_avg = np.mean(away_tour_stats['goals_for']) if away_tour_stats['goals_for'] else form_a['form_10_goals_scored_avg']
+        away_tour_ga_avg = np.mean(away_tour_stats['goals_against']) if away_tour_stats['goals_against'] else form_a['form_10_goals_conceded_avg']
+
         # 赛事权重
         tour_weight = get_tournament_weight(tournament)
 
@@ -262,6 +291,18 @@ class MatchFeatureBuilder:
             features[f'away_{k}'] = v
         # 对战记录
         features.update(h2h)
+        # 赛事走势特征（激进模型用）
+        features['tournament_avg_goals'] = tournament_avg_goals
+        features['tournament_std_goals'] = tournament_std_goals
+        features['tournament_over_2_5_rate'] = tournament_over_2_5_rate
+        features['tournament_match_count'] = tournament_match_count
+        features['home_tournament_gf_avg'] = home_tour_gf_avg
+        features['home_tournament_ga_avg'] = home_tour_ga_avg
+        features['away_tournament_gf_avg'] = away_tour_gf_avg
+        features['away_tournament_ga_avg'] = away_tour_ga_avg
+        # 球队在本届赛事的火力偏差
+        features['home_tournament_attack_bias'] = home_tour_gf_avg / max(form_h['form_10_goals_scored_avg'], 0.3)
+        features['away_tournament_attack_bias'] = away_tour_gf_avg / max(form_a['form_10_goals_scored_avg'], 0.3)
         # 衍生特征
         features['form_diff_winrate'] = form_h['form_10_winrate'] - form_a['form_10_winrate']
         features['form_diff_goaldiff'] = form_h['form_10_goaldiff_avg'] - form_a['form_10_goaldiff_avg']
@@ -295,6 +336,20 @@ class MatchFeatureBuilder:
         # 更新最近比赛日期
         self.last_match_date[home_team] = date
         self.last_match_date[away_team] = date
+
+        # 更新赛事走势统计（总进球数）
+        total_goals = home_score + away_score
+        self.tournament_goals[tournament].append(total_goals)
+
+        # 更新球队在本届赛事的统计
+        home_key = (home_team, tournament)
+        away_key = (away_team, tournament)
+        self.team_tournament_stats[home_key]['goals_for'].append(home_score)
+        self.team_tournament_stats[home_key]['goals_against'].append(away_score)
+        self.team_tournament_stats[home_key]['matches'] += 1
+        self.team_tournament_stats[away_key]['goals_for'].append(away_score)
+        self.team_tournament_stats[away_key]['goals_against'].append(home_score)
+        self.team_tournament_stats[away_key]['matches'] += 1
 
 
 def prepare_dataset(matches_df: pd.DataFrame, start_year: int = 2002) -> Tuple[pd.DataFrame, EloRatingSystem]:
