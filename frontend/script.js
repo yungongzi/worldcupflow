@@ -509,23 +509,140 @@ function renderPrediction(p) {
 // ===========================
 let scheduleData = [];
 let schedulePhaseFilter = 'all';
-let scheduleDateFilter = 'all';
+let scheduleDateFilter = 'all';      // 'all' | 'upcoming' | 'played' | 'YYYY-MM-DD'
+let scheduleLastUpdated = null;      // 最近一次成功拉取时间
+let scheduleRefreshTimer = null;     // 定时刷新 timer
+
+// ── 工具：把 ISO 日期/时间字符串转成 'YYYY-MM-DD'（北京时间 UTC+8）
+function toLocalDateStr(iso) {
+  if (!iso) return '';
+  // iso 有时带时区、有时不带，统一偏移到 +8
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(0, 10);
+  const offset = 8 * 60;   // CST = UTC+8
+  const local = new Date(d.getTime() + (offset - d.getTimezoneOffset()) * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+// ── 工具：把 'YYYY-MM-DD' 格式化为 "6月11日（星期三）"
+function formatDateLabel(dateStr) {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+  const now = new Date();
+  const nowStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  let extra = '';
+  if (dateStr === nowStr) extra = ' · 今天';
+  else {
+    const tomorrow = new Date(now.getTime() + 86400000);
+    const tStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
+    if (dateStr === tStr) extra = ' · 明天';
+  }
+  return `${m}月${d}日（周${weekDays[dt.getDay()]}）${extra}`;
+}
 
 async function loadSchedule() {
   const grid = $('#scheduleGrid');
   try {
     const data = await fetchJSON(`${API}/worldcup/full-schedule`);
     scheduleData = data.matches || [];
+    scheduleLastUpdated = new Date();
+    updateScheduleLastUpdatedUI();
     renderSchedule();
     setupScheduleFilters();
   } catch (e) {
-    grid.innerHTML = `
+    if (grid) grid.innerHTML = `
       <div class="loading-card glass">
         <p style="color: var(--accent-danger);">赛程加载失败</p>
         <p style="font-size: 12px; margin-top: 8px;">${e.message}</p>
       </div>
     `;
   }
+}
+
+// ── 更新"最后更新时间"文字
+function updateScheduleLastUpdatedUI() {
+  const el = $('#scheduleLastUpdated');
+  if (!el || !scheduleLastUpdated) return;
+  const h = String(scheduleLastUpdated.getHours()).padStart(2, '0');
+  const min = String(scheduleLastUpdated.getMinutes()).padStart(2, '0');
+  el.textContent = `上次更新：${h}:${min}`;
+}
+
+// ── 启动定时自动刷新（页面可见时每 10 分钟刷新一次赛程）
+function startScheduleAutoRefresh() {
+  if (scheduleRefreshTimer) clearInterval(scheduleRefreshTimer);
+  scheduleRefreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      loadSchedule();
+    }
+  }, 10 * 60 * 1000);   // 10 分钟
+  // 标签页从后台切换回来时也触发一次
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const now = Date.now();
+      const last = scheduleLastUpdated ? scheduleLastUpdated.getTime() : 0;
+      // 超过 5 分钟未更新则刷新
+      if (now - last > 5 * 60 * 1000) loadSchedule();
+    }
+  });
+}
+
+// ── 日期滚动箭头控制
+function updateDateScrollArrows() {
+  const container = $('#scheduleDateFilter');
+  const leftArrow = $('#dateScrollLeft');
+  const rightArrow = $('#dateScrollRight');
+  if (!container || !leftArrow || !rightArrow) return;
+
+  // 判断是否需要显示箭头（内容宽度 > 容器可视宽度）
+  const needsScroll = container.scrollWidth > container.clientWidth + 2;
+  const wrap = $('#scheduleDateScrollWrap');
+  if (wrap) {
+    wrap.classList.toggle('has-overflow', needsScroll);
+  }
+
+  if (!needsScroll) {
+    leftArrow.classList.add('disabled');
+    rightArrow.classList.add('disabled');
+    return;
+  }
+
+  // 左侧箭头：未滚到最左时可用
+  leftArrow.classList.toggle('disabled', container.scrollLeft <= 2);
+  // 右侧箭头：未滚到最右时可用
+  rightArrow.classList.toggle('disabled', container.scrollLeft + container.clientWidth >= container.scrollWidth - 2);
+}
+
+function scrollDateTabs(direction) {
+  const container = $('#scheduleDateFilter');
+  if (!container) return;
+  const scrollAmount = container.clientWidth * 0.65;
+  const target = direction === 'left'
+    ? container.scrollLeft - scrollAmount
+    : container.scrollLeft + scrollAmount;
+  container.scrollTo({ left: target, behavior: 'smooth' });
+}
+
+function scrollActiveDateTabIntoView() {
+  const container = $('#scheduleDateFilter');
+  if (!container) return;
+  const activeTab = container.querySelector('.date-tab.active');
+  if (!activeTab) return;
+
+  // 计算 active tab 在容器中的位置
+  const tabLeft = activeTab.offsetLeft;
+  const tabRight = tabLeft + activeTab.offsetWidth;
+  const viewLeft = container.scrollLeft;
+  const viewRight = viewLeft + container.clientWidth;
+
+  // 如果 tab 在可视区域内，不需要滚动
+  if (tabLeft >= viewLeft && tabRight <= viewRight) return;
+
+  // 滚动使 active tab 居中
+  const targetLeft = tabLeft - container.clientWidth / 2 + activeTab.offsetWidth / 2;
+  container.scrollTo({ left: Math.max(0, targetLeft), behavior: 'smooth' });
 }
 
 function setupScheduleFilters() {
@@ -536,7 +653,6 @@ function setupScheduleFilters() {
   // 避免重复绑定
   if (filterContainer.dataset.bound) return;
   filterContainer.dataset.bound = '1';
-  dateContainer.dataset.bound = '1';
 
   filterContainer.addEventListener('click', (e) => {
     const tab = e.target.closest('.filter-tab');
@@ -547,14 +663,51 @@ function setupScheduleFilters() {
     renderSchedule();
   });
 
-  dateContainer.addEventListener('click', (e) => {
-    const tab = e.target.closest('.date-tab');
-    if (!tab) return;
-    dateContainer.querySelectorAll('.date-tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    scheduleDateFilter = tab.dataset.date;
-    renderSchedule();
-  });
+  // 日期 tab 使用事件委托
+  if (!dateContainer.dataset.bound) {
+    dateContainer.dataset.bound = '1';
+    dateContainer.addEventListener('click', (e) => {
+      const tab = e.target.closest('.date-tab');
+      if (!tab) return;
+      dateContainer.querySelectorAll('.date-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      scheduleDateFilter = tab.dataset.date;
+      renderSchedule();
+    });
+
+    // 监听滚动以更新箭头状态
+    dateContainer.addEventListener('scroll', () => {
+      updateDateScrollArrows();
+    }, { passive: true });
+
+    // 鼠标滚轮横向滚动（premium touch）
+    dateContainer.addEventListener('wheel', (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        dateContainer.scrollLeft += e.deltaY;
+      }
+    }, { passive: false });
+
+    // 窗口 resize 时更新箭头
+    window.addEventListener('resize', () => {
+      updateDateScrollArrows();
+    }, { passive: true });
+  }
+
+  // 左右滚动箭头
+  const leftArrow = $('#dateScrollLeft');
+  const rightArrow = $('#dateScrollRight');
+  if (leftArrow && !leftArrow.dataset.bound) {
+    leftArrow.dataset.bound = '1';
+    leftArrow.addEventListener('click', () => scrollDateTabs('left'));
+  }
+  if (rightArrow && !rightArrow.dataset.bound) {
+    rightArrow.dataset.bound = '1';
+    rightArrow.addEventListener('click', () => scrollDateTabs('right'));
+  }
+
+  // 初始更新箭头状态
+  updateDateScrollArrows();
 
   // 更新比分按钮
   const refreshBtn = $('#btnRefreshScores');
@@ -563,32 +716,214 @@ function setupScheduleFilters() {
     refreshBtn.addEventListener('click', async () => {
       if (refreshBtn.classList.contains('loading')) return;
       refreshBtn.classList.add('loading');
-      const originalText = refreshBtn.innerHTML;
+      const originalHTML = refreshBtn.innerHTML;
       refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg> 更新中...';
       try {
         const resp = await fetch(`${API}/worldcup/update-scores`, { method: 'POST' });
         const data = await resp.json();
         if (data.status === 'ok') {
           refreshBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> ' + (data.message || '已更新');
-          // 重新加载赛程
           await loadSchedule();
         } else {
-          refreshBtn.innerHTML = originalText;
+          refreshBtn.innerHTML = originalHTML;
         }
       } catch (e) {
-        refreshBtn.innerHTML = originalText;
+        refreshBtn.innerHTML = originalHTML;
       }
       setTimeout(() => {
         refreshBtn.classList.remove('loading');
-        refreshBtn.innerHTML = originalText;
+        refreshBtn.innerHTML = originalHTML;
       }, 3000);
     });
   }
 }
 
+// ── 赛程卡片上的手动更新比分按钮
+let scheduleEditOverlay = null;
+
+function setupScheduleEditButtons() {
+  const grid = $('#scheduleGrid');
+  if (!grid) return;
+
+  // 事件委托：点击编辑按钮
+  grid.addEventListener('click', (e) => {
+    const btn = e.target.closest('.schedule-edit-btn');
+    if (!btn) return;
+    e.stopPropagation();
+
+    const matchDate = btn.dataset.date;
+    const homeTeam = btn.dataset.home;
+    const awayTeam = btn.dataset.away;
+
+    showScoreEditPopup(btn, matchDate, homeTeam, awayTeam);
+  });
+}
+
+function showScoreEditPopup(triggerBtn, matchDate, homeTeam, awayTeam) {
+  // 移除旧弹窗
+  if (scheduleEditOverlay) scheduleEditOverlay.remove();
+
+  const existingData = findExistingScore(matchDate, homeTeam, awayTeam);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'score-edit-overlay';
+  overlay.innerHTML = `
+    <div class="score-edit-popup glass">
+      <div class="score-edit-header">
+        <strong>${homeTeam} vs ${awayTeam}</strong>
+        <span class="score-edit-date">${matchDate}</span>
+      </div>
+      <div class="score-edit-body">
+        <div class="score-edit-inputs">
+          <input type="number" class="score-input" id="editHomeScore" placeholder="主" min="0" max="20"
+            value="${existingData ? existingData.home_score : ''}">
+          <span class="score-edit-sep">:</span>
+          <input type="number" class="score-input" id="editAwayScore" placeholder="客" min="0" max="20"
+            value="${existingData ? existingData.away_score : ''}">
+        </div>
+      </div>
+      <div class="score-edit-actions">
+        <button class="btn-secondary" id="editCancel">取消</button>
+        <button class="btn-primary" id="editSubmit">更新比分</button>
+      </div>
+      <div class="score-edit-status" id="editStatus"></div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  scheduleEditOverlay = overlay;
+
+  // 事件绑定
+  overlay.querySelector('#editCancel').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  overlay.querySelector('#editSubmit').addEventListener('click', async () => {
+    const hsEl = overlay.querySelector('#editHomeScore');
+    const asEl = overlay.querySelector('#editAwayScore');
+    const statusEl = overlay.querySelector('#editStatus');
+
+    const hs = parseInt(hsEl.value);
+    const as = parseInt(asEl.value);
+
+    if (isNaN(hs) || isNaN(as) || hs < 0 || as < 0) {
+      statusEl.textContent = '请输入有效的比分（≥0）';
+      statusEl.className = 'score-edit-status error';
+      return;
+    }
+
+    const submitBtn = overlay.querySelector('#editSubmit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = '更新中...';
+    statusEl.textContent = '';
+    statusEl.className = 'score-edit-status';
+
+    try {
+      const params = new URLSearchParams({
+        home_team: homeTeam,
+        away_team: awayTeam,
+        match_date: matchDate,
+        home_score: hs,
+        away_score: as,
+      });
+      const resp = await fetch(`${API}/worldcup/manual-score?${params}`, { method: 'POST' });
+      const data = await resp.json();
+
+      if (data.status === 'ok') {
+        statusEl.textContent = `✓ ${data.message}`;
+        statusEl.className = 'score-edit-status success';
+        // 延迟关闭并刷新赛程
+        setTimeout(() => {
+          overlay.remove();
+          loadSchedule();
+        }, 1000);
+      } else {
+        statusEl.textContent = data.message || '更新失败';
+        statusEl.className = 'score-edit-status error';
+        submitBtn.disabled = false;
+        submitBtn.textContent = '更新比分';
+      }
+    } catch (e) {
+      statusEl.textContent = `网络错误: ${e.message}`;
+      statusEl.className = 'score-edit-status error';
+      submitBtn.disabled = false;
+      submitBtn.textContent = '更新比分';
+    }
+  });
+
+  // 自动聚焦第一个输入框
+  setTimeout(() => overlay.querySelector('#editHomeScore')?.focus(), 100);
+}
+
+function findExistingScore(matchDate, homeTeam, awayTeam) {
+  const match = scheduleData.find(m =>
+    m.home_team === homeTeam &&
+    m.away_team === awayTeam &&
+    m.played
+  );
+  if (match) return { home_score: match.home_score, away_score: match.away_score };
+
+  // 也检查可能互换的
+  const swapped = scheduleData.find(m =>
+    m.home_team === awayTeam &&
+    m.away_team === homeTeam &&
+    m.played
+  );
+  if (swapped) return { home_score: swapped.away_score, away_score: swapped.home_score };
+
+  return null;
+}
+
+// ── 动态生成日期快速跳转 tabs
+function buildDateTabs() {
+  const dateContainer = $('#scheduleDateFilter');
+  if (!dateContainer) return;
+
+  // 从当前筛选后的数据提取所有出现的日期
+  let pool = scheduleData;
+  if (schedulePhaseFilter !== 'all') {
+    pool = pool.filter(m => m.phase === schedulePhaseFilter);
+  }
+
+  const uniqueDates = [...new Set(pool.map(m => toLocalDateStr(m.date)).filter(Boolean))].sort();
+  const today = (() => {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+  })();
+
+  // 固定前三个 tab，动态日期跟在后面
+  const fixedTabs = [
+    { date: 'all',      label: '全部' },
+    { date: 'upcoming', label: '未开始' },
+    { date: 'played',   label: '已完赛' },
+  ];
+
+  const dateTabs = uniqueDates.map(d => ({
+    date: d,
+    label: d === today ? `今天` : `${parseInt(d.slice(5,7))}/${parseInt(d.slice(8,10))}`,
+  }));
+
+  const allTabs = [...fixedTabs, ...dateTabs];
+
+  dateContainer.innerHTML = allTabs.map(t => {
+    const active = t.date === scheduleDateFilter ? ' active' : '';
+    return `<button class="date-tab${active}" data-date="${t.date}" title="${t.date.length === 10 ? formatDateLabel(t.date) : ''}">${t.label}</button>`;
+  }).join('');
+
+  // 渲染完成后：自动滚动 active tab 到可见区域 + 更新箭头状态
+  requestAnimationFrame(() => {
+    scrollActiveDateTabIntoView();
+    updateDateScrollArrows();
+  });
+}
+
 function renderSchedule() {
   const grid = $('#scheduleGrid');
   if (!grid) return;
+
+  // 重建日期 tab（轮次变化会影响可见日期范围）
+  buildDateTabs();
 
   let filtered = scheduleData;
 
@@ -602,6 +937,9 @@ function renderSchedule() {
     filtered = filtered.filter(m => m.played);
   } else if (scheduleDateFilter === 'upcoming') {
     filtered = filtered.filter(m => !m.played);
+  } else if (scheduleDateFilter.length === 10 && scheduleDateFilter.includes('-')) {
+    // 精确日期筛选
+    filtered = filtered.filter(m => toLocalDateStr(m.date) === scheduleDateFilter);
   }
 
   if (filtered.length === 0) {
@@ -609,7 +947,32 @@ function renderSchedule() {
     return;
   }
 
-  grid.innerHTML = filtered.map(m => renderScheduleCard(m)).join('');
+  // ── 按日期分组渲染
+  const groups = {};
+  filtered.forEach(m => {
+    const key = toLocalDateStr(m.date) || 'unknown';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(m);
+  });
+
+  const sortedKeys = Object.keys(groups).sort();
+  let html = '';
+
+  sortedKeys.forEach(dateKey => {
+    const matches = groups[dateKey];
+    const labelHTML = dateKey !== 'unknown'
+      ? `<div class="schedule-date-group-header">
+           <span class="schedule-date-group-label">${formatDateLabel(dateKey)}</span>
+           <span class="schedule-date-group-count">${matches.length} 场</span>
+         </div>`
+      : '';
+    html += labelHTML;
+    html += `<div class="schedule-date-group">`;
+    html += matches.map(m => renderScheduleCard(m)).join('');
+    html += `</div>`;
+  });
+
+  grid.innerHTML = html;
 }
 
 function renderScheduleCard(m) {
@@ -624,7 +987,6 @@ function renderScheduleCard(m) {
   if (isFinal) phaseTagClass += ' final';
 
   let phaseLabel = m.phase_zh;
-  // 小组赛右上角统一显示"小组赛"，具体组别放到日期行，避免重复
 
   // 比分区域
   let scoreArea;
@@ -649,19 +1011,25 @@ function renderScheduleCard(m) {
   if (m.country) venueParts.push(m.country);
   const venueStr = venueParts.join(' · ');
 
-  // 小组标签
-  const groupTag = (m.phase === 'group' && m.group && m.group !== '?')
-    ? `` : '';   //`<span class="schedule-group-tag">${m.group}组</span>`
-
   const teamClass = isTBD ? 'schedule-team tbd' : 'schedule-team';
   const cardClass = `schedule-card glass${played ? ' played' : ''}${isKnockout ? ' knockout' : ''}`;
 
+  // 编辑按钮（非 TBD 比赛显示）
+  const editBtn = isTBD ? '' : `
+    <button class="schedule-edit-btn" title="手动更新比分"
+      data-match-id="${m.match_id || ''}"
+      data-date="${m.date.split('T')[0] || ''}"
+      data-home="${m.home_team}"
+      data-away="${m.away_team}"
+      data-played="${played}"
+    >✎</button>`;
+
   return `
-    <div class="${cardClass}" data-home="${m.home_team}" data-away="${m.away_team}">
+    <div class="${cardClass}" data-home="${m.home_team}" data-away="${m.away_team}" data-match-id="${m.match_id || ''}">
       <span class="${phaseTagClass}">${phaseLabel}</span>
+      ${editBtn}
       <div class="schedule-date">
         <span class="schedule-date-text">${formatDate(m.date)}</span>
-        ${groupTag}
       </div>
       <div class="schedule-match">
         <div class="${teamClass}">
@@ -1669,6 +2037,12 @@ async function init() {
   loadLiveMatches();
   loadSchedule();
   loadRecentResults();
+
+  // 启动赛程自动刷新（每 10 分钟 + 标签页可见时）
+  startScheduleAutoRefresh();
+
+  // 设置赛程卡片上的手动比分编辑按钮事件
+  setupScheduleEditButtons();
 
   // 设置搜索
   setupTeamSearch('homeInput', 'homeSuggestions', 'home');
